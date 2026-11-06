@@ -1,0 +1,8 @@
+# dataset e derivati (non versionati: licenza/dimensione)
+output/
+splits/*.npz
+
+# Python
+__pycache__/
+*.egg-info/
+.ipynb_checkpoints/
