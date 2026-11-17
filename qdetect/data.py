@@ -33,7 +33,7 @@ FEATURES: list[str] = [
     "base_pwr_db", "rssi", "relpwr_db", "avgpwr_db",
 ]
 TARGET = "label_encoded"
-SPLIT_FORMAT_VERSION = 1
+SPLIT_FORMAT_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +46,7 @@ def sample_per_class(
     features: Sequence[str] = FEATURES,
     target: str = TARGET,
     chunksize: int = 500_000,
+    exclude_groups: Optional[np.ndarray] = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Campione uniforme senza reinserimento di ``cap_per_class`` righe per classe.
 
@@ -55,6 +56,10 @@ def sample_per_class(
     stesso ordine, quindi il risultato dipende solo da ``seed`` e dal contenuto del
     file, non da ``chunksize``.
 
+    ``exclude_groups``: hash (da ``vector_hashes``) di vettori da scartare, ad
+    esempio tutti quelli presenti nel file di training, per campionare dal test
+    solo righe *mai viste* in training.
+
     Restituisce il DataFrame (feature, ``target``, ``row_id`` = posizione della
     riga nel file, header escluso) ordinato per ``row_id``, e le statistiche di
     lettura.
@@ -63,7 +68,8 @@ def sample_per_class(
     rng = np.random.default_rng(seed)
     kept: dict[int, Optional[pd.DataFrame]] = {0: None, 1: None}
     seen = {0: 0, 1: 0}
-    n_rows = n_dropped = 0
+    n_rows = n_dropped = n_excluded = 0
+    excl = np.unique(np.asarray(exclude_groups, dtype=np.uint64)) if exclude_groups is not None else None
 
     reader = pd.read_csv(path, usecols=features + [target], chunksize=chunksize,
                          low_memory=False)
@@ -79,6 +85,10 @@ def sample_per_class(
         n_dropped += int((~ok).sum())
         chunk = chunk.loc[ok]
         y = y.loc[ok].astype(int)
+        if excl is not None:
+            fresh = ~_isin_sorted(feature_groups(chunk[features]), excl)
+            n_excluded += int((~fresh).sum())
+            chunk, y = chunk.loc[fresh], y.loc[fresh]
 
         for c in (0, 1):
             sub = chunk.loc[y == c]
@@ -99,8 +109,8 @@ def sample_per_class(
     df[target] = df[target].astype(int)
     df = df.sort_values("row_id").reset_index(drop=True)
     stats = {"rows_in_file": n_rows, "rows_per_class_in_file": seen,
-             "rows_dropped_bad_label": n_dropped, "sample_seed": seed,
-             "cap_per_class": cap_per_class}
+             "rows_dropped_bad_label": n_dropped, "rows_excluded_by_group": n_excluded,
+             "sample_seed": seed, "cap_per_class": cap_per_class}
     return df, stats
 
 
@@ -108,9 +118,79 @@ def sample_per_class(
 # 2. Diagnostica sul campione
 # ---------------------------------------------------------------------------
 def feature_groups(X: np.ndarray | pd.DataFrame) -> np.ndarray:
-    """Identificativo (hash uint64) del vettore di feature: righe identiche → stesso id."""
-    frame = pd.DataFrame(np.asarray(X))
+    """Identificativo (hash uint64) del vettore di feature: righe identiche → stesso id.
+
+    I valori sono convertiti in float64 prima dell'hash, così lo stesso vettore ha
+    lo stesso id sia letto come interi dal CSV sia come float dopo il campionamento.
+    """
+    frame = pd.DataFrame(np.asarray(X, dtype=np.float64))
     return pd.util.hash_pandas_object(frame, index=False).to_numpy()
+
+
+def _isin_sorted(values: np.ndarray, sorted_unique: np.ndarray) -> np.ndarray:
+    if len(sorted_unique) == 0:
+        return np.zeros(len(values), dtype=bool)
+    pos = np.searchsorted(sorted_unique, values)
+    pos[pos == len(sorted_unique)] = 0
+    return sorted_unique[pos] == values
+
+
+def vector_hashes(
+    path: str | Path,
+    features: Sequence[str] = FEATURES,
+    chunksize: int = 2_000_000,
+) -> np.ndarray:
+    """Hash ordinati e unici di tutti i vettori di feature di un CSV (letto a blocchi).
+
+    Serve a sapere quali vettori del test compaiono già nel file di training.
+    """
+    features = list(features)
+    out = []
+    for chunk in pd.read_csv(path, usecols=features, chunksize=chunksize):
+        out.append(np.unique(feature_groups(chunk[features])))
+    return np.unique(np.concatenate(out))
+
+
+def overlap_report(train_path: str | Path, test_path: str | Path,
+                   features: Sequence[str] = FEATURES, target: str = TARGET,
+                   chunksize: int = 2_000_000) -> dict:
+    """Quante righe del test hanno un vettore di feature identico a una riga del train.
+
+    ``lookup_accuracy_on_seen``: accuratezza di una semplice tabella che, per ogni
+    vettore già visto, predice l'etichetta più frequente nel train. Se è alta, le
+    metriche sul test originale misurano soprattutto la memorizzazione.
+    """
+    features = list(features)
+
+    def counts(path):
+        parts = []
+        for ch in pd.read_csv(path, usecols=features + [target], chunksize=chunksize):
+            g = pd.DataFrame({"h": feature_groups(ch[features]),
+                              "y": pd.to_numeric(ch[target], errors="coerce")})
+            parts.append(g[g["y"].isin([0, 1])].groupby(["h", "y"]).size())
+            if len(parts) >= 8:
+                parts = [pd.concat(parts).groupby(level=[0, 1]).sum()]
+        tab = pd.concat(parts).groupby(level=[0, 1]).sum().unstack(fill_value=0)
+        for c in (0, 1):
+            if c not in tab.columns:
+                tab[c] = 0
+        return tab
+
+    tr, te = counts(train_path), counts(test_path)
+    shared = te.index.intersection(tr.index)
+    n_te = int((te[0] + te[1]).sum())
+    seen_rows = int((te.loc[shared, 0] + te.loc[shared, 1]).sum())
+    maj = tr.loc[shared, 1] > tr.loc[shared, 0]
+    correct = int(np.where(maj, te.loc[shared, 1], te.loc[shared, 0]).sum())
+    return {
+        "train_rows": int((tr[0] + tr[1]).sum()), "train_unique_vectors": int(len(tr)),
+        "test_rows": n_te, "test_unique_vectors": int(len(te)),
+        "test_unique_vectors_in_train": int(len(shared)),
+        "test_rows_with_vector_in_train": seen_rows,
+        "test_rows_frac_in_train": seen_rows / n_te,
+        "test_rows_novel": n_te - seen_rows,
+        "lookup_accuracy_on_seen": correct / seen_rows if seen_rows else float("nan"),
+    }
 
 
 def duplicate_report(X: np.ndarray, y: np.ndarray) -> dict:
@@ -155,13 +235,14 @@ class Split:
     idx_val: np.ndarray
     idx_test: np.ndarray
     meta: dict = field(default_factory=dict)
+    source: Optional[np.ndarray] = None   # (N,) file di provenienza: 0 = train CSV, 1 = test CSV
+    extra: dict = field(default_factory=dict)  # altri insiemi di valutazione {nome: indici}
 
     def summary(self) -> pd.DataFrame:
-        rows = []
-        for name in ("train", "train_large", "val", "test"):
-            idx = getattr(self, f"idx_{name}")
-            rows.append({"set": name, "n": len(idx), "frac_malicious": float(self.y[idx].mean())})
-        return pd.DataFrame(rows)
+        sets = {name: getattr(self, f"idx_{name}") for name in ("train", "train_large", "val", "test")}
+        sets.update(self.extra)
+        return pd.DataFrame([{"set": k, "n": len(v), "frac_malicious": float(self.y[v].mean())}
+                             for k, v in sets.items()])
 
 
 def _stratified_take(idx: np.ndarray, y: np.ndarray, n: int, seed: int, name: str) -> np.ndarray:
@@ -264,6 +345,69 @@ def make_split(
     return split
 
 
+def make_split_from_files(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    test_original_df: Optional[pd.DataFrame] = None,
+    n_train: int = 5_000,
+    n_train_large: int = 20_000,
+    n_val: int = 1_000,
+    n_test: int = 5_000,
+    val_frac: float = 0.10,
+    seed: int = 42,
+    features: Sequence[str] = FEATURES,
+    target: str = TARGET,
+) -> Split:
+    """Split che rispetta la divisione originale train / test del dataset.
+
+    * train, train_large e validation vengono dal campione del file di training,
+      divisi per gruppi di vettori identici (nessun vettore in comune);
+    * ``idx_test`` viene da ``test_df``: va campionato con
+      ``sample_per_class(test_path, ..., exclude_groups=vector_hashes(train_path))``
+      così contiene solo vettori **mai visti nell'intero file di training**;
+      per sicurezza si tolgono anche i vettori presenti nel campione di train/val;
+    * ``test_original_df`` (facoltativo): campione del test così com'è, compresi i
+      vettori già visti, salvato in ``extra['test_original']`` solo per confronto
+      con i risultati ottenuti sul test originale.
+    """
+    features = list(features)
+    frames = [train_df.assign(_src=0), test_df.assign(_src=1)]
+    if test_original_df is not None:
+        frames.append(test_original_df.assign(_src=2))
+    df = pd.concat(frames, ignore_index=True)
+    X = df[features].to_numpy(dtype=float)
+    y = df[target].to_numpy(dtype=int)
+    row_id = df["row_id"].to_numpy() if "row_id" in df else np.arange(len(df))
+    src = df["_src"].to_numpy()
+    groups = feature_groups(X)
+
+    tr_all = np.flatnonzero(src == 0)
+    gss = GroupShuffleSplit(n_splits=1, test_size=val_frac, random_state=seed)
+    a, b = next(gss.split(tr_all, y[tr_all], groups[tr_all]))
+    tr_pool, va_pool = tr_all[a], tr_all[b]
+    te_pool = np.flatnonzero(src == 1)
+    seen = np.unique(groups[np.r_[tr_pool, va_pool]])
+    te_pool = te_pool[~_isin_sorted(groups[te_pool], seen)]
+
+    if n_train > n_train_large:
+        raise ValueError("n_train deve essere <= n_train_large")
+    split = Split(
+        X=X, y=y, row_id=row_id, features=features,
+        idx_train_large=(trl := _stratified_take(tr_pool, y, n_train_large, seed + 10, "train_large")),
+        idx_train=_stratified_take(trl, y, n_train, seed + 11, "train"),
+        idx_val=_stratified_take(va_pool, y, n_val, seed + 12, "val"),
+        idx_test=_stratified_take(te_pool, y, n_test, seed + 13, "test"),
+        source=np.where(src == 2, 1, src),
+        meta={"strategy": "files", "seed": seed, "val_frac": val_frac,
+              "pool_sizes": {"train": len(tr_pool), "val": len(va_pool), "test": len(te_pool)}},
+    )
+    if test_original_df is not None:
+        split.extra["test_original"] = _stratified_take(np.flatnonzero(src == 2), y, n_test,
+                                                        seed + 14, "test_original")
+    check_split(split)
+    return split
+
+
 def check_split(split: Split) -> None:
     """Asserzioni di integrità: nessuna riga e nessun vettore condiviso tra insiemi."""
     g = feature_groups(split.X)
@@ -283,23 +427,27 @@ def save_split(split: Split, path: str | Path, extra_meta: Optional[dict] = None
     path.parent.mkdir(parents=True, exist_ok=True)
     meta = {**split.meta, **(extra_meta or {}), "features": split.features,
             "format_version": SPLIT_FORMAT_VERSION}
-    np.savez_compressed(
-        path, X=split.X, y=split.y, row_id=split.row_id,
-        idx_train=split.idx_train, idx_train_large=split.idx_train_large,
-        idx_val=split.idx_val, idx_test=split.idx_test,
-        meta=np.array(json.dumps(meta, default=str)),
-    )
+    arrays = {"X": split.X, "y": split.y, "row_id": split.row_id,
+              "idx_train": split.idx_train, "idx_train_large": split.idx_train_large,
+              "idx_val": split.idx_val, "idx_test": split.idx_test}
+    if split.source is not None:
+        arrays["source"] = split.source
+    for name, idx in split.extra.items():
+        arrays[f"extra__{name}"] = idx
+    np.savez_compressed(path, meta=np.array(json.dumps(meta, default=str)), **arrays)
     return path
 
 
 def load_split(path: str | Path) -> Split:
     with np.load(path, allow_pickle=False) as z:
         meta = json.loads(str(z["meta"]))
-        if meta.get("format_version") != SPLIT_FORMAT_VERSION:
+        if meta.get("format_version") not in (1, SPLIT_FORMAT_VERSION):
             raise ValueError(f"Versione split non supportata: {meta.get('format_version')}")
         split = Split(X=z["X"], y=z["y"], row_id=z["row_id"], features=list(meta["features"]),
                       idx_train=z["idx_train"], idx_train_large=z["idx_train_large"],
-                      idx_val=z["idx_val"], idx_test=z["idx_test"], meta=meta)
+                      idx_val=z["idx_val"], idx_test=z["idx_test"], meta=meta,
+                      source=z["source"] if "source" in z.files else None,
+                      extra={k[len("extra__"):]: z[k] for k in z.files if k.startswith("extra__")})
     check_split(split)
     return split
 
@@ -322,6 +470,7 @@ class Prepared:
     features: list[str]
     preprocessor: Pipeline
     config: dict
+    extra: dict = field(default_factory=dict)  # {nome: (X, y)} per gli insiemi in split.extra
 
 
 def angle_map(Z: np.ndarray, scale: float) -> np.ndarray:
@@ -369,4 +518,5 @@ def prepare(
         config={"features_in": features, "features_out": selected, "k_best": k_best,
                 "angle_scale": angle_scale, "fit_on": fit_on,
                 "split_strategy": split.meta.get("strategy")},
+        extra={name: (tf(idx), split.y[idx]) for name, idx in split.extra.items()},
     )

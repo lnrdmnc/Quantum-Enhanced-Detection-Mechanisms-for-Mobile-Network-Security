@@ -118,3 +118,52 @@ def test_duplicate_report_floor():
     assert r["unique_vectors"] == 3
     assert r["conflicting_vectors"] == 1
     assert r["bayes_error_floor"] == pytest.approx(1 / 5)
+
+
+# --- test originale separato -------------------------------------------------
+def two_files(tmp_path):
+    tr = tmp_path / "train_dataset.csv"
+    te = tmp_path / "test_dataset.csv"
+    fake_csv(tr, n=6000, seed=0, bad_labels=0)
+    df_te = fake_csv(te, n=3000, seed=1, bad_labels=0)
+    # metà del test copia righe del train: vettori "già visti"
+    df_tr = pd.read_csv(tr)
+    df_te.iloc[:1500] = df_tr.iloc[:1500].to_numpy()
+    df_te.to_csv(te, index=False)
+    return tr, te
+
+
+def test_hash_ignores_int_vs_float():
+    a = pd.DataFrame({"x": [1, 2], "y": [3, 4]})
+    np.testing.assert_array_equal(D.feature_groups(a), D.feature_groups(a.to_numpy(float)))
+
+
+def test_overlap_and_exclusion(tmp_path):
+    tr, te = two_files(tmp_path)
+    rep = D.overlap_report(tr, te, chunksize=1000)
+    assert rep["test_rows"] == 3000
+    assert rep["test_rows_with_vector_in_train"] >= 1500
+    hashes = D.vector_hashes(tr, chunksize=1000)
+    novel, st = D.sample_per_class(te, cap_per_class=5000, seed=1, exclude_groups=hashes)
+    assert st["rows_excluded_by_group"] == rep["test_rows_with_vector_in_train"]
+    assert len(novel) == rep["test_rows_novel"]
+    assert not np.isin(D.feature_groups(novel[D.FEATURES]), hashes).any()
+
+
+def test_make_split_from_files(tmp_path):
+    tr, te = two_files(tmp_path)
+    hashes = D.vector_hashes(tr)
+    train_df, _ = D.sample_per_class(tr, 3000, seed=2)
+    test_df, _ = D.sample_per_class(te, 3000, seed=2, exclude_groups=hashes)
+    orig_df, _ = D.sample_per_class(te, 3000, seed=3)
+    sp = D.make_split_from_files(train_df, test_df, orig_df, n_train=400, n_train_large=1200,
+                                 n_val=200, n_test=500)
+    assert (sp.source[sp.idx_test] == 1).all() and (sp.source[sp.idx_train_large] == 0).all()
+    assert not np.isin(D.feature_groups(sp.X[sp.idx_test]), hashes).any()
+    assert len(sp.extra["test_original"]) == 500
+    p = D.save_split(sp, tmp_path / "s.npz")
+    sp2 = D.load_split(p)
+    np.testing.assert_array_equal(sp2.extra["test_original"], sp.extra["test_original"])
+    np.testing.assert_array_equal(sp2.source, sp.source)
+    P = D.prepare(sp2, angle_scale=2.0)
+    assert P.extra["test_original"][0].shape == (500, 8)
