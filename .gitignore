@@ -12,3 +12,4 @@ results/protocollo_file/*.zip
 results/protocollo_file/*/synthetic/
 results/protocollo_file/*/quantum_gram_*.csv
 results/passive_canali/*.pkl.gz
+results/qca9880/*.pkl.gz

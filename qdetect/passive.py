@@ -26,24 +26,29 @@ ALL7 = ["noise", "max_magnitude", "total_gain_db", "base_pwr_db", "rssi", "relpw
 WINDOWS = (8, 32, 128)
 
 
-def channel_windows(df: pd.DataFrame, fields: list[str] = ALL7, windows: Iterable[int] = WINDOWS) -> list[dict]:
-    """Per ogni canale del file e ogni W: media e covarianza (triangolo superiore) delle
-    prime W righe a quel canale. Restituisce una lista di record."""
+def channel_windows(df: pd.DataFrame, fields: list[str] = ALL7, windows: Iterable[int] = WINDOWS,
+                    max_windows: int = 1, channels: Optional[Iterable[int]] = None) -> list[dict]:
+    """Per ogni canale del file e ogni W: media e covarianza (triangolo superiore) di
+    finestre di W righe consecutive a quel canale (fino a ``max_windows`` finestre non
+    sovrapposte, ``window`` = indice). ``channels`` limita i canali considerati."""
     f1 = df["freq1"].to_numpy()
     X = df[fields].to_numpy(dtype=float)
+    keep = set(int(c) for c in channels) if channels is not None else None
     out = []
     iu = np.triu_indices(len(fields))
     for c in pd.unique(f1):
+        if keep is not None and int(c) not in keep:
+            continue
         rows = X[f1 == c]
+        rows = rows[np.isfinite(rows).all(1)]
         for w in windows:
-            if len(rows) < w:
-                continue
-            a = rows[:w]
-            mu = a.mean(0)
-            cov = np.cov(a, rowvar=False, bias=True)[iu] if w > 1 else np.zeros(len(iu[0]))
-            out.append({"channel": int(c), "W": int(w), "n_rows_channel": int(len(rows)),
-                        **{f"m_{k}": v for k, v in zip(fields, mu)},
-                        **{f"c_{fields[i]}_{fields[j]}": v for i, j, v in zip(iu[0], iu[1], cov)}})
+            for k in range(min(max_windows, len(rows) // w)):
+                a = rows[k * w:(k + 1) * w]
+                mu = a.mean(0)
+                cov = np.cov(a, rowvar=False, bias=True)[iu] if w > 1 else np.zeros(len(iu[0]))
+                out.append({"channel": int(c), "W": int(w), "window": k, "n_rows_channel": int(len(rows)),
+                            **{f"m_{k2}": v for k2, v in zip(fields, mu)},
+                            **{f"c_{fields[i]}_{fields[j]}": v for i, j, v in zip(iu[0], iu[1], cov)}})
     return out
 
 

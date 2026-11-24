@@ -50,3 +50,12 @@ def test_channel_matrix_diagonal():
     off = M[(M.monitored_mhz != M.jammer_mhz)].auroc
     assert (diag > 0.95).all()
     assert (off < 0.75).all()  # nessuna scorciatoia nei dati fittizi
+
+
+def test_channel_windows_multiple_and_filter():
+    rng = np.random.default_rng(2)
+    d = sweep(rng, jam=5745, power=2, rows_per_ch=100)
+    recs = P.channel_windows(d, windows=(8, 32), max_windows=4, channels=[5745])
+    assert {r["channel"] for r in recs} == {5745}
+    assert sum(r["W"] == 8 for r in recs) == 4 and sum(r["W"] == 32 for r in recs) == 3
+    assert sorted(r["window"] for r in recs if r["W"] == 32) == [0, 1, 2]
