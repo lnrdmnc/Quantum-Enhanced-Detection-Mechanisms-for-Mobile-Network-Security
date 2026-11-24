@@ -6,3 +6,8 @@ splits/*.npz
 __pycache__/
 *.egg-info/
 .ipynb_checkpoints/
+
+# risultati del protocollo: archivi e dati sintetici di prova
+results/protocollo_file/*.zip
+results/protocollo_file/*/synthetic/
+results/protocollo_file/*/quantum_gram_*.csv
