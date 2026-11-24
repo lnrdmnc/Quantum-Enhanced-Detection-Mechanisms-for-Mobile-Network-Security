@@ -1,0 +1,20 @@
+{
+  "revision": "protocollo-relatore-v0.1-file",
+  "mode": "REAL_EXPLORATORY_ONLY",
+  "files": 21901,
+  "excluded": 0,
+  "metric_rows": 28728,
+  "geometry_rows": 64,
+  "independent_sessions_verified": false,
+  "sequential_ready": false,
+  "quantum_advantage_demonstrated": false,
+  "decision": "STOP_CONFIRMATORY__INDEPENDENT_SESSIONS_AND_RISK_REQUIRED",
+  "design_sha256": "62cb4e4febda5299b68772b583219d60b01d4a71fe22d1e00257bddb690c0a1d",
+  "versions": {
+    "python": "3.10.19",
+    "numpy": "2.2.6",
+    "pandas": "2.3.3",
+    "scipy": "1.15.3",
+    "sklearn": "1.7.2"
+  }
+}
