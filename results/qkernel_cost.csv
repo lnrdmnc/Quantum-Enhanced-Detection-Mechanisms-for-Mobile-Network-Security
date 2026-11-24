@@ -1,0 +1,10 @@
+fase,overlaps,epsilon,shots_per_overlap,total_shots
+Gram di training N=96,4560,0.05,2423,11048880
+Gram di training N=96,4560,0.02,15143,69052080
+Gram di training N=96,4560,0.01,60570,276199200
+Gram di training N=1500,1124250,0.05,3525,3962981250
+Gram di training N=1500,1124250,0.02,22027,24763854750
+Gram di training N=1500,1124250,0.01,88108,99055419000
+una predizione (contro 1.500 righe),1500,0.05,2201,3301500
+una predizione (contro 1.500 righe),1500,0.02,13753,20629500
+una predizione (contro 1.500 righe),1500,0.01,55011,82516500
