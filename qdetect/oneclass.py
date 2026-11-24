@@ -16,6 +16,7 @@ Unità di rischio = riga, non file: è un limite dichiarato del CSV.
 from __future__ import annotations
 
 import itertools
+import os
 import time
 from typing import Callable, Iterable, Optional
 
@@ -31,6 +32,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 
 ALPHAS = (0.01, 0.001, 0.0001)
+N_JOBS = int(os.environ.get("QDETECT_N_JOBS", "-1"))  # su server condivisi: limitare
 
 # Insiemi di feature (ablation E3). freq1 è il canale: nella specifica è una variabile
 # di stratificazione, non un input; "all8" serve solo a confrontarsi con i risultati
@@ -78,7 +80,7 @@ def one_class_models(X_benign: np.ndarray, seed: int = 42, ocsvm_cap: int = 1500
     yield "mahalanobis", lw.mahalanobis
     pca = PCA(n_components=max(1, min(B.shape[1] - 1, len(B) - 1, 8)), random_state=seed).fit(B)
     yield "pca_residual", lambda x: ((x - pca.inverse_transform(pca.transform(x))) ** 2).sum(1)
-    iso = IsolationForest(n_estimators=200, random_state=seed, n_jobs=-1).fit(B)
+    iso = IsolationForest(n_estimators=200, random_state=seed, n_jobs=N_JOBS).fit(B)
     yield "isolation_forest", lambda x: -iso.score_samples(x)
     bb = B[np.random.default_rng(seed).choice(len(B), min(ocsvm_cap, len(B)), replace=False)]
     oc = OneClassSVM(gamma="scale", nu=0.05).fit(bb)
@@ -89,7 +91,7 @@ def one_class_models(X_benign: np.ndarray, seed: int = 42, ocsvm_cap: int = 1500
 
 
 def supervised_reference(X: np.ndarray, y: np.ndarray, seed: int = 42):
-    rf = RandomForestClassifier(n_estimators=300, min_samples_leaf=2, n_jobs=-1,
+    rf = RandomForestClassifier(n_estimators=300, min_samples_leaf=2, n_jobs=N_JOBS,
                                 random_state=seed, class_weight="balanced").fit(X, y)
     return "supervised_rf", lambda x: rf.predict_proba(x)[:, 1]
 
